@@ -1,8 +1,14 @@
 package main
 
-import "os"
+import (
+	"os"
+)
 
 func main() {
-	cli := &CLI{outStream: os.Stdout, errStream: os.Stderr}
+	// cli := &CLI{outStream: os.Stdout, errStream: os.Stderr}
+	cli := &CLI{
+		outStream: os.Stdout,
+		errStream: os.Stderr,
+	}
 	os.Exit(cli.Run(os.Args))
 }
