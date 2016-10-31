@@ -5,10 +5,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
+
+	"gopkg.in/pipe.v2"
 )
 
 // Exit codes are int values that represent an exit code for a particular error.
@@ -77,21 +81,18 @@ func (cli *CLI) Run(args []string) int {
 	fmt.Printf("Cmd file: [%s]\n", cli.cmdFile)
 	fmt.Printf("Cmd dir : [%s]\n", cli.cmdDir)
 
-	cmd := exec.Command("bash", "-c")
-	stdin, e := cmd.StdinPipe()
-	stdout, e := cmd.StdoutPipe()
-	stderr, e := cmd.StderrPipe()
-
-	_ = stdout
-	_ = stderr
-
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		l := scanner.Text()
-		fmt.Println(l)
-		io.WriteString(stdin, l)
-		stdin.Close()
+	// Get files.
+	fs, e := getFiles(".")
+	failOnError(e)
+	for f := range fs {
+		fmt.Println(f)
 	}
+
+	// Execute bash.
+	cmd, e := cmdLoop("bash")
+
+	// Wait cmd exit.
+	failOnError(cmd.Wait())
 
 	_ = sql
 
@@ -102,6 +103,93 @@ func (cli *CLI) Run(args []string) int {
 	_ = sid
 
 	return ExitCodeOK
+}
+
+func cmdLoop(command string) (*exec.Cmd, error) {
+	var e error
+
+	cmd := exec.Command(command)
+	stdin, e := cmd.StdinPipe()
+	stdout, e := cmd.StdoutPipe()
+	stderr, e := cmd.StderrPipe()
+
+	e = cmd.Start()
+	if e != nil {
+		return nil, e
+	}
+
+	// stdout scan loop.
+	outScanner := bufio.NewScanner(stdout)
+	go scanLoop(outScanner)
+	// stderr scan loop.
+	errScanner := bufio.NewScanner(stderr)
+	go scanLoop(errScanner)
+
+	// Get os.stdin and put cmd stdin.
+	go func() {
+		p := pipe.Line(
+			pipe.Read(os.Stdin),
+			pipe.Write(stdin),
+		)
+		failOnError(pipe.Run(p))
+		s, e := pipe.Output(p)
+		failOnError(e)
+		fmt.Println(s)
+	}()
+
+	// return command
+	return cmd, e
+}
+
+func getFiles(root string) (chan string, error) {
+	var (
+		q  = make(chan string)
+		e  error
+		wg = new(sync.WaitGroup)
+		fn func(p string)
+	)
+
+	fmt.Printf("root: [%s]", root)
+
+	// Get file list func.
+	fn = func(p string) {
+		defer func() { wg.Done() }()
+
+		fis, e := ioutil.ReadDir(p)
+		if e != nil {
+			failOnError(e)
+		}
+		for _, fi := range fis {
+			full := filepath.Join(p, fi.Name())
+			if fi.IsDir() {
+				wg.Add(1)
+				go fn(full)
+			} else {
+				q <- full
+			}
+		}
+	}
+
+	// Start file list.
+	wg.Add(1)
+	go fn(root)
+
+	// Wait.
+	go func() {
+		wg.Wait()
+		close(q)
+	}()
+
+	return q, e
+}
+
+func scanLoop(scanner *bufio.Scanner) {
+	for scanner.Scan() {
+		fmt.Println(scanner.Text())
+	}
+	if e := scanner.Err(); e != nil {
+		fmt.Fprintln(os.Stderr, e)
+	}
 }
 
 // failOnError is easy to judge error.
